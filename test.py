@@ -1,36 +1,35 @@
+import glob, sys, time, serial, os
 import tkinter as tk
 import random
 import pandas as pd
-import time
-import glob, sys, serial, os
+import numpy as np
 from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial import Serial
 from threading import Thread, Event
 from queue import Queue
-#import psychopy.hardware.keyboard  # no longer needed here
-import numpy as np
+from psychopy.hardware import keyboard
 
-# ===========================
-#  BrainFlow Setup Variables
-# ===========================
+# ====================================
+#       Global Variables & Setup
+# ====================================
 lsl_out = False
-save_dir = 'data/misc/'
-run = 1  # Run number used for file naming
-save_file_aux = os.path.join(save_dir, f'aux_run-{run}.npy')
+save_dir = 'data/misc/'  # Directory to save data to
+run = 1  # Run number (used for file naming)
+save_file_aux = save_dir + f'aux_run-{run}.npy'
 sampling_rate = 250
-CYTON_BOARD_ID = 0  # 0 if no daisy; 2 for daisy; 6 for daisy+wifi shield
+CYTON_BOARD_ID = 0  # 0 if no daisy; 2 if using daisy board; 6 if using daisy+wifi shield
 BAUD_RATE = 115200
-ANALOGUE_MODE = '/2'  # Reads from analog pins A5, A6 and (if no wifi shield) A7
-
-# Stop event to signal termination for BrainFlow thread
+ANALOGUE_MODE = '/2'  # Reads from analog pins A5(D11), A6(D12) and, if no wifi shield, then A7(D13)
+# We create the stop event globally so that both parts can signal termination.
 stop_event = Event()
-brainflow_eeg = np.zeros((8, 0))
-brainflow_aux = np.zeros((3, 0))
 
+# =================================================
+#         BrainFlow Code (DO NOT CHANGE IT)
+# =================================================
 def find_openbci_port():
-    """Find the port for the OpenBCI dongle."""
+    """Finds the port to which the Cyton Dongle is connected to."""
     if sys.platform.startswith('win'):
-        ports = [f'COM{i+1}' for i in range(256)]
+        ports = ['COM%s' % (i + 1) for i in range(256)]
     elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'):
         ports = glob.glob('/dev/ttyUSB*')
     elif sys.platform.startswith('darwin'):
@@ -42,9 +41,10 @@ def find_openbci_port():
         try:
             s = Serial(port=port, baudrate=BAUD_RATE, timeout=None)
             s.write(b'v')
-            time.sleep(2)
             line = ''
+            time.sleep(2)
             if s.inWaiting():
+                line = ''
                 c = ''
                 while '$$$' not in line:
                     c = s.read().decode('utf-8', errors='replace')
@@ -56,89 +56,106 @@ def find_openbci_port():
             pass
     if openbci_port == '':
         raise OSError('Cannot find OpenBCI port.')
-    return openbci_port
+        exit()
+    else:
+        return openbci_port
 
-def brainflow_thread_func():
-    """Initialize the board, start streaming, and continuously collect data until signaled to stop."""
-    global brainflow_eeg, brainflow_aux
+def run_brainflow():
+    # --- Begin of BrainFlow code (unchanged) ---
     print(BoardShim.get_board_descr(CYTON_BOARD_ID))
     params = BrainFlowInputParams()
     if CYTON_BOARD_ID != 6:
         params.serial_port = find_openbci_port()
-    else:
+    elif CYTON_BOARD_ID == 6:
         params.ip_port = 9000
     board = BoardShim(CYTON_BOARD_ID, params)
     board.prepare_session()
-    print(board.config_board('/0'))
-    print(board.config_board('//'))
-    print(board.config_board(ANALOGUE_MODE))
+    res_query = board.config_board('/0')
+    print(res_query)
+    res_query = board.config_board('//')
+    print(res_query)
+    res_query = board.config_board(ANALOGUE_MODE)
+    print(res_query)
     board.start_stream(45000)
-
-    # Create a thread-safe queue for board data
-    queue_in = Queue()
-
-    def get_data(queue_in):
+    
+    def get_data(queue_in, lsl_out=False):
         while not stop_event.is_set():
             data_in = board.get_board_data()
             timestamp_in = data_in[board.get_timestamp_channel(CYTON_BOARD_ID)]
             eeg_in = data_in[board.get_eeg_channels(CYTON_BOARD_ID)]
             aux_in = data_in[board.get_analog_channels(CYTON_BOARD_ID)]
             if len(timestamp_in) > 0:
-                # Optionally print shapes for debugging
-                # print('BrainFlow queue-in:', eeg_in.shape, aux_in.shape, timestamp_in.shape)
+                print('queue-in: ', eeg_in.shape, aux_in.shape, timestamp_in.shape)
                 queue_in.put((eeg_in, aux_in, timestamp_in))
             time.sleep(0.1)
-
-    # Start a thread to fetch data from the board
-    data_thread = Thread(target=get_data, args=(queue_in,))
-    data_thread.daemon = True
-    data_thread.start()
-
-    # Process data from the queue
+    
+    queue_in = Queue()
+    cyton_thread = Thread(target=get_data, args=(queue_in, lsl_out))
+    cyton_thread.daemon = True
+    cyton_thread.start()
+    
+    kb = keyboard.Keyboard()
+    eeg = np.zeros((8, 0))
+    aux = np.zeros((3, 0))
     while not stop_event.is_set():
         time.sleep(0.1)
+        keys = kb.getKeys()
+        if 'escape' in keys:
+            stop_event.set()
+            break
         while not queue_in.empty():
             eeg_in, aux_in, timestamp_in = queue_in.get()
-            brainflow_eeg = np.hstack((brainflow_eeg, eeg_in))
-            brainflow_aux = np.hstack((brainflow_aux, aux_in))
-            # Optionally print the updated shapes
-            # print('BrainFlow collected:', brainflow_eeg.shape, brainflow_aux.shape)
-
-    # Stop stream and release board session once stop_event is set
-    board.stop_stream()
-    board.release_session()
-
-# ================================
-#  Tkinter Experiment (GUI) Code
-# ================================
-def run_tkinter_experiment():
-    # Create full-screen window
+            print('queue-out: ', eeg_in.shape, aux_in.shape, timestamp_in.shape)
+            eeg = np.hstack((eeg, eeg_in))
+            aux = np.hstack((aux, aux_in))
+            print('total: ', eeg.shape, aux.shape)
+    
+    os.makedirs(save_dir, exist_ok=True)
+    np.save(save_file_aux, aux)
+    # --- End of BrainFlow code ---
+    
+    # Convert the auxiliary data to a DataFrame and save as CSV
+    # (Here we assume that 'aux' has shape (channels, n_samples))
+    df_brainflow = pd.DataFrame(aux.T, columns=[f"Aux_Channel_{i}" for i in range(aux.shape[0])])
+    df_brainflow.to_csv(os.path.join(save_dir, f'aux_run-{run}.csv'), index=False)
+    
+# =================================================
+#         Tkinter Experiment Code (Unchanged)
+# =================================================
+def run_tkinter():
     root = tk.Tk()
     root.title("Random Moving Ball")
+    
+    # Get screen dimensions and set full screen
     SCREEN_WIDTH = root.winfo_screenwidth()
     SCREEN_HEIGHT = root.winfo_screenheight()
     root.geometry(f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}")
+    
     canvas = tk.Canvas(root, width=SCREEN_WIDTH, height=SCREEN_HEIGHT, bg="brown")
     canvas.pack()
-
+    
     # Ball properties
     BALL_RADIUS = 20
     MOVE_DISTANCE = min(SCREEN_WIDTH, SCREEN_HEIGHT) // 3
     STEP_DELAY = 50
-    REST_DELAY = 500  # in milliseconds
-
+    REST_DELAY = 500  # 0.5 sec rest
+    
     # Center coordinates and ball creation
     center_x = SCREEN_WIDTH // 2
     center_y = SCREEN_HEIGHT // 2
     ball = canvas.create_oval(center_x - BALL_RADIUS, center_y - BALL_RADIUS,
                               center_x + BALL_RADIUS, center_y + BALL_RADIUS,
                               fill="blue")
+    
+    # Countdown text
     countdown_text = canvas.create_text(center_x, center_y - 100, text="",
                                         font=("Helvetica", 64), fill="black")
+    
+    # Data storage for Tkinter experiment moves
     move_log = []
     move_count = {"left": 0, "right": 0, "up": 0, "down": 0}
     MAX_MOVES_PER_DIRECTION = 5
-
+    
     def start_countdown():
         countdown_numbers = ["3", "2", "1", "Go!"]
         def show_number(index=0):
@@ -149,26 +166,31 @@ def run_tkinter_experiment():
                 canvas.itemconfig(countdown_text, text="")
                 canvas.after(500, animate_ball)
         show_number()
-
+    
     def choose_direction():
         valid_directions = [d for d, count in move_count.items() if count < MAX_MOVES_PER_DIRECTION]
         if not valid_directions:
             finish_experiment()
             return None
         return random.choice(valid_directions)
-
+    
     def animate_ball():
         direction = choose_direction()
         if direction is None:
-            return
+            return  # All moves complete.
+    
         velocity = random.randint(5, 20)
-        # Log move information with timestamp
+    
+        # Log data before move starts
         move_log.append({
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
             "direction": direction,
             "speed": velocity
         })
+    
         move_count[direction] += 1
+    
+        # Set movement vector
         dx, dy = 0, 0
         if direction == 'left':
             dx = -velocity
@@ -178,8 +200,9 @@ def run_tkinter_experiment():
             dy = -velocity
         elif direction == 'down':
             dy = velocity
+    
         moved_distance = 0
-
+    
         def move_step():
             nonlocal moved_distance
             if moved_distance < MOVE_DISTANCE:
@@ -188,8 +211,9 @@ def run_tkinter_experiment():
                 canvas.after(STEP_DELAY, move_step)
             else:
                 canvas.after(REST_DELAY, return_to_center)
+    
         move_step()
-
+    
     def return_to_center():
         coords = canvas.coords(ball)
         current_x = (coords[0] + coords[2]) / 2
@@ -198,33 +222,38 @@ def run_tkinter_experiment():
         dy = center_y - current_y
         canvas.move(ball, dx, dy)
         canvas.after(REST_DELAY, animate_ball)
-
+    
     def finish_experiment():
-        # Save move log to CSV
         df = pd.DataFrame(move_log)
         print(df)
         df.to_csv("move_log.csv", index=False)
-        # Signal BrainFlow thread to stop and then close the GUI
+        # Signal BrainFlow code to stop (via the shared stop_event)
         stop_event.set()
         root.destroy()
-
-    # Optionally, bind the Escape key to finish the experiment
-    root.bind("<Escape>", lambda event: finish_experiment())
+    
     start_countdown()
     root.mainloop()
+    return move_log
 
-# ====================================
-#  Start Both Experiments Concurrently
-# ====================================
-# Run BrainFlow acquisition in a background thread.
-brainflow_thread = Thread(target=brainflow_thread_func)
+# =================================================
+#       Run Both Experiments Concurrently
+# =================================================
+
+# Start BrainFlow experiment in a background thread.
+brainflow_thread = Thread(target=run_brainflow)
 brainflow_thread.daemon = True
 brainflow_thread.start()
 
 # Run the Tkinter experiment in the main thread.
-run_tkinter_experiment()
+tk_move_log = run_tkinter()
 
-# After the GUI closes, save BrainFlow auxiliary data.
-os.makedirs(save_dir, exist_ok=True)
-np.save(save_file_aux, brainflow_aux)
-print("BrainFlow auxiliary data saved to:", save_file_aux)
+# After both experiments finish, load and combine data.
+df_brainflow = pd.read_csv(os.path.join(save_dir, f'aux_run-{run}.csv'))
+df_tkinter = pd.DataFrame(tk_move_log)
+
+# Combine the two dataframes into an Excel workbook with separate sheets.
+with pd.ExcelWriter(os.path.join(save_dir, f'combined_run-{run}.xlsx')) as writer:
+    df_brainflow.to_excel(writer, sheet_name='BrainFlow', index=False)
+    df_tkinter.to_excel(writer, sheet_name='Tkinter', index=False)
+
+print("Data from both experiments have been saved as DataFrames.")
