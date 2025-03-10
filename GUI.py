@@ -1,9 +1,20 @@
-import tkinter as tk
-import random
-import pandas as pd
+import os
 import time
+import random
+import numpy as np
+import pandas as pd
+import tkinter as tk
 from threading import Thread
-from pyOpenBCI import OpenBCICyton
+
+from brainflow.board_shim import BoardShim, BrainFlowInputParams, BoardIds, LogLevels
+from brainflow.data_filter import DataFilter
+
+def get_next_filename(prefix="data", ext="csv"):
+    """Iterate through filenames until an unused one is found."""
+    index = 1
+    while os.path.exists(f"{prefix}{index:02d}.{ext}"):
+        index += 1
+    return f"{prefix}{index:02d}.{ext}"
 
 class EOGExperiment:
     def __init__(self, root, board_port='COM3'):
@@ -33,28 +44,42 @@ class EOGExperiment:
         self.move_count = {"left": 0, "right": 0, "up": 0, "down": 0}
         self.MAX_MOVES_PER_DIRECTION = 5
 
-        # List of raw EOG samples from OpenBCI
+        # List to store raw EOG samples from BrainFlow
         self.eog_data = []
 
-        # Connect to OpenBCI
-        self.board = OpenBCICyton(port=board_port)
-        self.board_thread = Thread(target=self.start_board_stream)
-        self.board_thread.daemon = True
+        # Set up BrainFlow board
+        params = BrainFlowInputParams()
+        params.serial_port = board_port
+        self.board_id = BoardIds.CYTON_BOARD.value
+        self.board = BoardShim(self.board_id, params)
+        self.board.prepare_session()
+        self.board.start_stream()  # Start streaming
 
+        # Flag to control the streaming thread
+        self.running = True
+        self.board_thread = Thread(target=self.stream_board_data)
+        self.board_thread.daemon = True
+        self.board_thread.start()
+
+        # Start the GUI countdown and ball animation
         self.start_countdown()
 
-    def start_board_stream(self, sample_rate=500):
-        """Stream data from OpenBCI in a separate thread."""
-        def handle_sample(sample):
-            # sample.channels is a list of channel readings (floats)
-            self.eog_data.append({
-                "timestamp": time.time(),  # high-resolution float
-                "channels": sample.channels
-            })
-        try:
-            self.board.start_stream(handle_sample, sample_rate=sample_rate)
-        except Exception as e:
-            print("Error streaming from OpenBCI:", e)
+    def stream_board_data(self):
+        """Continuously poll the board for new data and store it."""
+        while self.running:
+            data = self.board.get_board_data()  # Returns new samples since the last call
+            if data.size > 0:
+                # data shape: (num_channels, num_samples)
+                num_samples = data.shape[1]
+                for i in range(num_samples):
+                    # Assume first row is timestamp, and remaining rows are channel data
+                    timestamp = data[0, i]
+                    channels = data[1:, i]
+                    self.eog_data.append({
+                        "timestamp": timestamp,
+                        "channels": channels.tolist()
+                    })
+            time.sleep(0.1)  # Poll every 100 ms
 
     def start_countdown(self):
         countdown_numbers = ["3", "2", "1", "Go!"]
@@ -80,10 +105,9 @@ class EOGExperiment:
             return
 
         velocity = random.randint(5, 20)
-        # Wedirection + a float timestamp
-        now = time.time()  # float time
+        now = time.time()
         self.move_log.append({
-            "timestamp": now,  # float time
+            "timestamp": now,
             "direction": direction,
             "speed": velocity
         })
@@ -120,7 +144,11 @@ class EOGExperiment:
         self.canvas.after(self.REST_DELAY, self.animate_ball)
 
     def finish_experiment(self):
-        # Save event log
+        # Stop board data streaming
+        self.running = False
+        self.board_thread.join()
+
+        # Save move log
         df_events = pd.DataFrame(self.move_log)
         df_events.to_csv("move_log.csv", index=False)
 
@@ -128,11 +156,60 @@ class EOGExperiment:
         df_eog = pd.DataFrame(self.eog_data)
         df_eog.to_csv("eog_data.csv", index=False)
 
-        self.board.disconnect()
+        # Stop and release the BrainFlow session
+        self.board.stop_stream()
+        self.board.release_session()
         self.root.destroy()
 
-if __name__ == '__main__':
+
+def run_experiment():
     root = tk.Tk()
-    root.title("EOG Experiment with OpenBCI")
+    root.title("EOG Experiment with BrainFlow")
     experiment = EOGExperiment(root, board_port='COM3')  # Update port if needed
     root.mainloop()
+
+
+def main():
+    # Enable BrainFlow logging
+    BoardShim.enable_dev_board_logger()
+
+    # Set up BrainFlow parameters for a standalone demo
+    params = BrainFlowInputParams()
+    params.serial_port = "COM3"  # Update as needed
+    board_id = BoardIds.CYTON_BOARD.value
+
+    board = BoardShim(board_id, params)
+    board.prepare_session()
+    board.start_stream()
+    BoardShim.log_message(LogLevels.LEVEL_INFO.value, 'Sleeping in the main thread')
+    time.sleep(10)  # Collect data for 10 seconds
+    data = board.get_board_data()
+    board.stop_stream()
+    board.release_session()
+
+    # Display a sample of the board data
+    df = pd.DataFrame(np.transpose(data))
+    print('Data From the Board')
+    print(df.head(10))
+
+    # Generate a unique filename (data01.csv, data02.csv, etc.)
+    filename = get_next_filename(prefix="data", ext="csv")
+    print(f"Saving data to {filename}")
+
+    # Save data using BrainFlow’s built-in serialization
+    DataFilter.write_file(data, filename, 'w')
+
+    # Optionally, read the file back to verify using BrainFlow's API
+    restored_data = DataFilter.read_file(filename)
+    restored_df = pd.DataFrame(np.transpose(restored_data))
+    print('Data Restored From the File')
+    print(restored_df.head(10))
+
+
+if __name__ == "__main__":
+    
+    # To run the GUI-based EOG experiment:
+    # run_experiment()
+    
+    # To run the standalone board data collection demo:
+    main()
