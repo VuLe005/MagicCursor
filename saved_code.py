@@ -7,15 +7,14 @@ from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial import Serial
 from threading import Thread, Event
 from queue import Queue
-from psychopy.hardware import keyboard
+# from psychopy.hardware import keyboard
 
-# ====================================
-#       Global Variables & Setup
-# ====================================
+
 lsl_out = False
-save_dir = 'data/misc/'  # Directory to save data to
+save_dir = 'data'  # Directory to save data to
 run = 1  # Run number (used for file naming)
 save_file_aux = save_dir + f'aux_run-{run}.npy'
+save_file_eeg = save_dir + f'eeg_run-{run}.npy'
 sampling_rate = 250
 CYTON_BOARD_ID = 0  # 0 if no daisy; 2 if using daisy board; 6 if using daisy+wifi shield
 BAUD_RATE = 115200
@@ -23,9 +22,6 @@ ANALOGUE_MODE = '/2'  # Reads from analog pins A5(D11), A6(D12) and, if no wifi 
 # We create the stop event globally so that both parts can signal termination.
 stop_event = Event()
 
-# =================================================
-#         BrainFlow Code (DO NOT CHANGE IT)
-# =================================================
 def find_openbci_port():
     """Finds the port to which the Cyton Dongle is connected to."""
     if sys.platform.startswith('win'):
@@ -61,7 +57,6 @@ def find_openbci_port():
         return openbci_port
 
 def run_brainflow():
-    # --- Begin of BrainFlow code (unchanged) ---
     print(BoardShim.get_board_descr(CYTON_BOARD_ID))
     params = BrainFlowInputParams()
     if CYTON_BOARD_ID != 6:
@@ -112,16 +107,18 @@ def run_brainflow():
     
     os.makedirs(save_dir, exist_ok=True)
     np.save(save_file_aux, aux)
+    np.save(save_file_eeg, eeg)
     # --- End of BrainFlow code ---
     
     # Convert the auxiliary data to a DataFrame and save as CSV
-    # (Here we assume that 'aux' has shape (channels, n_samples))
     df_brainflow = pd.DataFrame(aux.T, columns=[f"Aux_Channel_{i}" for i in range(aux.shape[0])])
     df_brainflow.to_csv(os.path.join(save_dir, f'aux_run-{run}.csv'), index=False)
+
+    df_brainflow = pd.DataFrame(eeg.T, columns=[f"EEG_Channel_{i}" for i in range(eeg.shape[0])])
+    df_brainflow.to_csv(os.path.join(save_dir, f'EEG_run-{run}.csv'), index=False)
     
-# =================================================
-#         Tkinter Experiment Code (Unchanged)
-# =================================================
+
+#         Tkinter Experiment Code
 def run_tkinter():
     root = tk.Tk()
     root.title("Random Moving Ball")
@@ -161,7 +158,7 @@ def run_tkinter():
         def show_number(index=0):
             if index < len(countdown_numbers):
                 canvas.itemconfig(countdown_text, text=countdown_numbers[index])
-                canvas.after(1000, show_number, index + 1)
+                canvas.after(4500, show_number, index + 1)
             else:
                 canvas.itemconfig(countdown_text, text="")
                 canvas.after(500, animate_ball)
@@ -240,20 +237,9 @@ def run_tkinter():
 # =================================================
 
 # Start BrainFlow experiment in a background thread.
-brainflow_thread = Thread(target=run_brainflow)
+brainflow_thread = Thread(target=run_tkinter)
 brainflow_thread.daemon = True
 brainflow_thread.start()
 
 # Run the Tkinter experiment in the main thread.
-tk_move_log = run_tkinter()
-
-# After both experiments finish, load and combine data.
-df_brainflow = pd.read_csv(os.path.join(save_dir, f'aux_run-{run}.csv'))
-df_tkinter = pd.DataFrame(tk_move_log)
-
-# Combine the two dataframes into an Excel workbook with separate sheets.
-with pd.ExcelWriter(os.path.join(save_dir, f'combined_run-{run}.xlsx')) as writer:
-    df_brainflow.to_excel(writer, sheet_name='BrainFlow', index=False)
-    df_tkinter.to_excel(writer, sheet_name='Tkinter', index=False)
-
-print("Data from both experiments have been saved as DataFrames.")
+tk_move_log = run_brainflow()
