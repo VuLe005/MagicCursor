@@ -12,7 +12,7 @@ from queue import Queue
 
 lsl_out = False
 save_dir = 'data'  # Directory to save data to
-run = 1  # Run number (used for file naming)
+run = 111  # Run number (used for file naming)
 save_file_aux = save_dir + f'aux_run-{run}.npy'
 save_file_eeg = save_dir + f'eeg_run-{run}.npy'
 sampling_rate = 250
@@ -118,7 +118,7 @@ def run_brainflow():
     df_brainflow.to_csv(os.path.join(save_dir, f'EEG_run-{run}.csv'), index=False)
     
 
-#         Tkinter Experiment Code
+# Tkinter Experiment Code
 def run_tkinter():
     root = tk.Tk()
     root.title("Random Moving Ball")
@@ -151,7 +151,7 @@ def run_tkinter():
     # Data storage for Tkinter experiment
     move_log = []
     move_count = {"left": 0, "right": 0, "up": 0, "down": 0}
-    MAX_MOVES_PER_DIRECTION = 5
+    MAX_MOVES_PER_DIRECTION = 10
     
     # Blink parameters
     MAX_BLINKS = 10           # Maximum number of blink events per session
@@ -259,7 +259,7 @@ def run_tkinter():
     def finish_experiment():
         df = pd.DataFrame(move_log)
         print(df)
-        df.to_csv("move1_log.csv", index=False)
+        df.to_csv("move111_log.csv", index=False)
         # Signal BrainFlow code to stop
         stop_event.set()
         root.destroy()
@@ -273,9 +273,9 @@ def run_tkinter():
 # =================================================
 
 # If you want to run BrainFlow + Tkinter concurrently:
-brainflow_thread = Thread(target=run_tkinter)
-brainflow_thread.daemon = True
-brainflow_thread.start()
+# brainflow_thread = Thread(target=run_tkinter)
+# brainflow_thread.daemon = True
+# brainflow_thread.start()
 
 # Otherwise, run Tkinter in the main thread:
-tk_move_log = run_brainflow()
+tk_move_log = run_tkinter()
